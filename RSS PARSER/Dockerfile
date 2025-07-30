@@ -24,5 +24,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the RSS script
 COPY gcp_rss.py .
 
-# On startup: launch Cloud SQL Proxy, then run your script
+# On startup: launch Cloud SQL Proxy, then run your script and cloud sql connection
 CMD ["sh","-c","/usr/local/bin/cloud_sql_proxy -dir=/cloudsql -instances=$CLOUD_SQL_CONNECTION_NAME & python gcp_rss.py"]
