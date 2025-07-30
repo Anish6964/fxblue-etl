@@ -9,14 +9,14 @@ import psycopg2
 from google.cloud import storage
 
 # ─── Configuration via ENV VARs ─────────────────────────────────────────────
-DB_USER = os.environ["DB_USER"]
-DB_PASSWORD = os.environ["DB_PASSWORD"]
-DB_NAME = os.environ["DB_NAME"]
-DB_SOCKET_DIR = os.environ.get("DB_SOCKET_DIR", "/cloudsql")
-CLOUD_SQL_CONNECTION_NAME = os.environ["CLOUD_SQL_CONNECTION_NAME"]
+# Database creds now via socket
+DB_NAME                    = os.environ["DB_NAME"]
+DB_USER                    = os.environ["DB_USER"]
+DB_PASSWORD                = os.environ["DB_PASSWORD"]
+CLOUD_SQL_CONNECTION_NAME  = os.environ["CLOUD_SQL_CONNECTION_NAME"]
 
 BUCKET_NAME = os.environ["BUCKET_NAME"]
-CSV_PREFIX = os.environ.get("CSV_PREFIX", "testcsvs/")
+CSV_PREFIX  = os.environ.get("CSV_PREFIX", "testcsvs/")
 
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 10))
 
@@ -26,12 +26,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 # ─── Database Utility ──────────────────────────────────────────────────────
 def get_db_conn():
-    """Get the connection to Cloud SQL via Unix socket"""
+    # connect via Cloud SQL socket
     return psycopg2.connect(
+        dbname=DB_NAME,
         user=DB_USER,
         password=DB_PASSWORD,
-        dbname=DB_NAME,
-        host=f'/cloudsql/{CLOUD_SQL_CONNECTION_NAME}'  # Using Cloud SQL socket path
+        host=f"/cloudsql/{CLOUD_SQL_CONNECTION_NAME}"
     )
 
 
@@ -65,17 +65,11 @@ ON CONFLICT (ticket) DO UPDATE SET
     sl                    = EXCLUDED.sl,
     trade_duration_hours  = EXCLUDED.trade_duration_hours
 """
-# gpt_inferred_strategy            = EXCLUDED.gpt_inferred_strategy,
-# gpt_strategy_confidence          = EXCLUDED.gpt_strategy_confidence,
-# gpt_trade_evaluation             = EXCLUDED.gpt_trade_evaluation,
-# gpt_alternative_action           = EXCLUDED.gpt_alternative_action,
-# was_gpt_recommendation_followed  = EXCLUDED.was_gpt_recommendation_followed,
-# gpt_impact_alignment             = EXCLUDED.gpt_impact_alignment;
 
 
 # ─── Core Processing Function ───────────────────────────────────────────────
 def process_blob(blob):
-    """Download, clean, and upsert one CSV blob. Logs and skips on error."""
+    """Download, clean, and upsert one CSV blob.  Logs and skips on error."""
     try:
         logging.info(f"Starting {blob.name}")
         raw = blob.download_as_bytes()
