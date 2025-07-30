@@ -1,0 +1,4 @@
+pandas
+feedparser
+psycopg2
+google-cloud-storage
