@@ -9,11 +9,11 @@ import psycopg2
 from google.cloud import storage
 
 # ─── Configuration via ENV VARs ─────────────────────────────────────────────
-DB_HOST = os.environ["DB_HOST"]
-DB_PORT = int(os.environ.get("DB_PORT", 5432))
-DB_NAME = os.environ["DB_NAME"]
 DB_USER = os.environ["DB_USER"]
 DB_PASSWORD = os.environ["DB_PASSWORD"]
+DB_NAME = os.environ["DB_NAME"]
+DB_SOCKET_DIR = os.environ.get("DB_SOCKET_DIR", "/cloudsql")
+CLOUD_SQL_CONNECTION_NAME = os.environ["CLOUD_SQL_CONNECTION_NAME"]
 
 BUCKET_NAME = os.environ["BUCKET_NAME"]
 CSV_PREFIX = os.environ.get("CSV_PREFIX", "testcsvs/")
@@ -26,8 +26,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 # ─── Database Utility ──────────────────────────────────────────────────────
 def get_db_conn():
+    """Get the connection to Cloud SQL via Unix socket"""
     return psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD
+        user=DB_USER,
+        password=DB_PASSWORD,
+        dbname=DB_NAME,
+        host=f'/cloudsql/{CLOUD_SQL_CONNECTION_NAME}'  # Using Cloud SQL socket path
     )
 
 
@@ -59,8 +63,7 @@ ON CONFLICT (ticket) DO UPDATE SET
     pips                  = EXCLUDED.pips,
     tp                    = EXCLUDED.tp,
     sl                    = EXCLUDED.sl,
-    trade_duration_hours  = EXCLUDED.trade_duration_hours,
-    
+    trade_duration_hours  = EXCLUDED.trade_duration_hours
 """
 # gpt_inferred_strategy            = EXCLUDED.gpt_inferred_strategy,
 # gpt_strategy_confidence          = EXCLUDED.gpt_strategy_confidence,
@@ -72,7 +75,7 @@ ON CONFLICT (ticket) DO UPDATE SET
 
 # ─── Core Processing Function ───────────────────────────────────────────────
 def process_blob(blob):
-    """Download, clean, and upsert one CSV blob.  Logs and skips on error."""
+    """Download, clean, and upsert one CSV blob. Logs and skips on error."""
     try:
         logging.info(f"Starting {blob.name}")
         raw = blob.download_as_bytes()
