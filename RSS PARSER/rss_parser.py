@@ -1,11 +1,31 @@
+import os
+import logging
 import feedparser
 import pandas as pd
 from datetime import datetime
 import pytz
 import psycopg2
+from google.cloud import storage
+from io import BytesIO
 
-# 1) Load list of accounts + RSS URLs + metadata
-df = pd.read_excel("30_RSS_Accounts.xlsx")
+# ─── Configuration via ENV VARs ─────────────────────────────────────────────
+DB_USER                    = os.environ["DB_USER"]
+DB_PASSWORD                = os.environ["DB_PASSWORD"]
+DB_NAME                    = os.environ["DB_NAME"]
+CLOUD_SQL_CONNECTION_NAME  = os.environ["CLOUD_SQL_CONNECTION_NAME"]
+
+BUCKET_NAME                = os.environ["BUCKET_NAME"]
+ACCOUNTS_FILE              = os.environ.get("ACCOUNTS_FILE", "rss_data/30_RSS_Accounts.xlsx")
+
+# ─── Logging Setup ─────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+# ─── Download & Load Excel from GCS ─────────────────────────────────────────
+storage_client = storage.Client()
+bucket         = storage_client.bucket(BUCKET_NAME)
+blob           = bucket.blob(ACCOUNTS_FILE)
+excel_bytes    = blob.download_as_bytes()
+df             = pd.read_excel(BytesIO(excel_bytes))
 
 
 def normalize_timestamp(ts_str):
@@ -16,20 +36,21 @@ def normalize_timestamp(ts_str):
     except Exception:
         return None
 
-
-# 2) DB connection params (Timescale + Postgres container)
+# ─── DB Connection via Cloud SQL socket ────────────────────────────────────
 conn = psycopg2.connect(
-    host="localhost", port=5432, dbname="postgres", user="postgres", password="mini"
+    user=os.environ["DB_USER"],
+    password=os.environ["DB_PASSWORD"],
+    dbname=os.environ["DB_NAME"],
+    host=f"/cloudsql/{CLOUD_SQL_CONNECTION_NAME}"
 )
 cur = conn.cursor()
 
-# 3) Loop accounts, upsert metadata, fetch & upsert trades
+# ─── Loop accounts, upsert metadata, fetch & upsert trades ─────────────────
 for _, row in df.iterrows():
-    acct_id = row["username"]
+    acct_id  = row["username"]
     acct_url = row["account_url"]
-    rss_url = row["rss_url"]
+    rss_url  = row["rss_url"]
 
-    # handle '-' as NULL
     def to_pct(x):
         if pd.isna(x) or x == "-":
             return None
@@ -54,50 +75,42 @@ for _, row in df.iterrows():
               trade_win      = EXCLUDED.trade_win,
               total_return   = EXCLUDED.total_return,
               trades_per_day = EXCLUDED.trades_per_day;
-    """,
+        """,
         (acct_id, acct_url, rss_url, win, ret, tpd),
     )
 
     # --- fetch & upsert trades ---
     feed = feedparser.parse(rss_url)
-
-    # account‐level placeholders
     bal = eq = fp = cp = fm = None
 
     for item in feed.entries:
-        # first capture the live account summary, if any
-        if "account_balance" in item:
+        if hasattr(item, "account_balance"):
             bal = float(item.account_balance)
-            eq = float(item.account_equity)
-            fp = float(item.account_floatingprofit)
-            cp = float(item.account_closedprofit)
-            fm = float(item.account_freemargin)
+            eq  = float(item.account_equity)
+            fp  = float(item.account_floatingprofit)
+            cp  = float(item.account_closedprofit)
+            fm  = float(item.account_freemargin)
 
-        # then each open/closed position
-        if "position_ticket" not in item:
+        if not hasattr(item, "position_ticket"):
             continue
 
         ticket = int(item.position_ticket)
         action = item.position_action
-        lots = float(item.position_lots) if item.position_lots else None
+        lots   = float(item.position_lots) if item.position_lots else None
         symbol = item.position_symbol
-        op = float(item.position_openprice) if item.position_openprice else None
-        clp = float(item.position_closeprice) if item.position_closeprice else None
-        ot = normalize_timestamp(item.position_opentime)
-        ct = (
-            normalize_timestamp(item.position_closetime)
-            if item.position_closetime != "Thu 1 Jan 1970 00:00:00"
-            else None
-        )
-        profit = float(item.position_profit) if item.position_profit else None
-        swap = float(item.position_swap) if item.position_swap else None
-        comm = float(item.position_commission) if item.position_commission else None
-        tpft = float(item.position_totalprofit) if item.position_totalprofit else None
-        tp_ = float(item.position_tp) if item.position_tp != "0" else None
-        sl_ = float(item.position_sl) if item.position_sl != "0" else None
-        mag = int(item.position_magicnumber) if item.position_magicnumber else None
+        op     = float(item.position_openprice)  if item.position_openprice   else None
+        clp    = float(item.position_closeprice) if item.position_closeprice  else None
+        ot     = normalize_timestamp(item.position_opentime)
+        ct     = normalize_timestamp(item.position_closetime) \
+                   if item.position_closetime!="Thu 1 Jan 1970 00:00:00" else None
+        profit = float(item.position_profit)      if item.position_profit      else None
+        swap   = float(item.position_swap)        if item.position_swap        else None
+        comm   = float(item.position_commission)  if item.position_commission  else None
+        tpft   = float(item.position_totalprofit) if item.position_totalprofit else None
+        tp_    = float(item.position_tp)          if item.position_tp!="0"     else None
+        sl_    = float(item.position_sl)          if item.position_sl!="0"     else None
+        mag    = int(item.position_magicnumber)   if item.position_magicnumber else None
 
-        # now upsert into rss_trades (31 cols = existing 26 + 5 new GPT fields)
         cur.execute(
             f"""
             INSERT INTO rss_trades (
@@ -114,74 +127,47 @@ for _, row in df.iterrows():
               trade_deviation_reasoning
             ) VALUES ({','.join(['%s']*31)})
             ON CONFLICT(ticket) DO UPDATE SET
-              account_id                 = EXCLUDED.account_id,
-              account_url                = EXCLUDED.account_url,
-              rss_url                    = EXCLUDED.rss_url,
-              trade_win                  = EXCLUDED.trade_win,
-              total_return               = EXCLUDED.total_return,
-              trades_per_day             = EXCLUDED.trades_per_day,
-              account_balance            = EXCLUDED.account_balance,
-              account_equity             = EXCLUDED.account_equity,
-              account_floating_profit    = EXCLUDED.account_floating_profit,
-              account_closed_profit      = EXCLUDED.account_closed_profit,
-              account_free_margin        = EXCLUDED.account_free_margin,
-              action                     = EXCLUDED.action,
-              lots                       = EXCLUDED.lots,
-              symbol                     = EXCLUDED.symbol,
-              open_price                 = EXCLUDED.open_price,
-              close_price                = EXCLUDED.close_price,
-              open_time                  = EXCLUDED.open_time,
-              close_time                 = EXCLUDED.close_time,
-              profit                     = EXCLUDED.profit,
-              swap                       = EXCLUDED.swap,
-              commission                 = EXCLUDED.commission,
-              total_profit               = EXCLUDED.total_profit,
-              take_profit                = EXCLUDED.take_profit,
-              stop_loss                  = EXCLUDED.stop_loss,
-              magic_number               = EXCLUDED.magic_number,
-              
-        """,
+              account_id                    = EXCLUDED.account_id,
+              account_url                   = EXCLUDED.account_url,
+              rss_url                       = EXCLUDED.rss_url,
+              trade_win                     = EXCLUDED.trade_win,
+              total_return                  = EXCLUDED.total_return,
+              trades_per_day                = EXCLUDED.trades_per_day,
+              account_balance               = EXCLUDED.account_balance,
+              account_equity                = EXCLUDED.account_equity,
+              account_floating_profit       = EXCLUDED.account_floating_profit,
+              account_closed_profit         = EXCLUDED.account_closed_profit,
+              account_free_margin           = EXCLUDED.account_free_margin,
+              action                        = EXCLUDED.action,
+              lots                          = EXCLUDED.lots,
+              symbol                        = EXCLUDED.symbol,
+              open_price                    = EXCLUDED.open_price,
+              close_price                   = EXCLUDED.close_price,
+              open_time                     = EXCLUDED.open_time,
+              close_time                    = EXCLUDED.close_time,
+              profit                        = EXCLUDED.profit,
+              swap                          = EXCLUDED.swap,
+              commission                    = EXCLUDED.commission,
+              total_profit                  = EXCLUDED.total_profit,
+              take_profit                   = EXCLUDED.take_profit,
+              stop_loss                     = EXCLUDED.stop_loss,
+              magic_number                  = EXCLUDED.magic_number,
+              gpt_recommendation_issued     = EXCLUDED.gpt_recommendation_issued,
+              gpt_recommendation_content    = EXCLUDED.gpt_recommendation_content,
+              gpt_recommendation_accuracy   = EXCLUDED.gpt_recommendation_accuracy,
+              gpt_suggestion_score          = EXCLUDED.gpt_suggestion_score,
+              trade_deviation_reasoning     = EXCLUDED.trade_deviation_reasoning;
+            """,
             (
-                acct_id,
-                acct_url,
-                rss_url,
-                win,
-                ret,
-                tpd,
-                bal,
-                eq,
-                fp,
-                cp,
-                fm,
-                ticket,
-                action,
-                lots,
-                symbol,
-                op,
-                clp,
-                ot,
-                ct,
-                profit,
-                swap,
-                comm,
-                tpft,
-                tp_,
-                sl_,
-                mag,
-                # five new GPT fields, all NULL for now:
-                None,
-                None,
-                None,
-                None,
-                None,
+                acct_id, acct_url, rss_url, win, ret, tpd,
+                bal, eq, fp, cp, fm,
+                ticket, action, lots, symbol,
+                op, clp, ot, ct,
+                profit, swap, comm, tpft, tp_,
+                sl_, mag,
+                None, None, None, None, None
             ),
         )
-
-    # gpt_recommendation_issued  = EXCLUDED.gpt_recommendation_issued,
-    #       gpt_recommendation_content = EXCLUDED.gpt_recommendation_content,
-    #       gpt_recommendation_accuracy= EXCLUDED.gpt_recommendation_accuracy,
-    #      gpt_suggestion_score       = EXCLUDED.gpt_suggestion_score,
-    #     trade_deviation_reasoning  = EXCLUDED.trade_deviation_reasoning;
 
 # 4) finalize
 conn.commit()
