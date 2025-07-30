@@ -1,4 +1,4 @@
 pandas
 feedparser
-psycopg2
+psycopg2-binary
 google-cloud-storage
