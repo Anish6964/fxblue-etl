@@ -1,24 +1,28 @@
-# Use official Python image as a parent
+# RSS_PARSER/Dockerfile
 FROM python:3.9-slim
 
-# Install dependencies and Cloud SQL Proxy
+# Install Postgres client libraries & curl
 RUN apt-get update && apt-get install -y \
     libpq-dev \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/*
 
-# Install the Cloud SQL Proxy
-RUN curl -sSL https://dl.google.com/cloudsql/cloud_sql_proxy.linux.amd64 -o /usr/local/bin/cloud_sql_proxy && \
-    chmod +x /usr/local/bin/cloud_sql_proxy
+# Install the Cloud SQL Proxy binary
+RUN curl -sSL https://dl.google.com/cloudsql/cloud_sql_proxy.linux.amd64 \
+     -o /usr/local/bin/cloud_sql_proxy \
+  && chmod +x /usr/local/bin/cloud_sql_proxy
+
+# Create the socket directory
+RUN mkdir /cloudsql
 
 WORKDIR /app
 
-# Copy the requirements.txt and install dependencies
+# Copy & install Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the entire content to the container
-COPY . .
+# Copy the RSS script
+COPY gcp_rss.py .
 
-# Run gcp_rss.py as the main script
-CMD ["sh", "-c", "/usr/local/bin/cloud_sql_proxy -dir=/cloudsql -credential_file=/secrets/cloudsql/credentials.json & python gcp_rss.py"]
+# On startup: launch Cloud SQL Proxy, then run your script
+CMD ["sh","-c","/usr/local/bin/cloud_sql_proxy -dir=/cloudsql -instances=$CLOUD_SQL_CONNECTION_NAME & python gcp_rss.py"]
