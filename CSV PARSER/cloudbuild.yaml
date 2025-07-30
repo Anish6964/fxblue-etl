@@ -1,0 +1,29 @@
+steps:
+  # Step 1: Build the Docker image for CSV job
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "-t"
+      - "gcr.io/$PROJECT_ID/gcp-csv-job:latest"
+      - "./gcp_csv"
+
+  # Step 2: Push the Docker image to Google Container Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "gcr.io/$PROJECT_ID/gcp-csv-job:latest"
+
+  # Step 3: Deploy to Cloud Run (CSV job)
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    args:
+      - "gcloud"
+      - "run"
+      - "deploy"
+      - "gcp-csv-job"
+      - "--image"
+      - "gcr.io/$PROJECT_ID/gcp-csv-job:latest"
+      - "--region"
+      - "us-central1" # Use your region here
+      - "--platform"
+      - "managed"
+      - "--allow-unauthenticated"
